@@ -1,0 +1,6 @@
+Variable,Description
+App,Application name
+Translated_Review,User review (Preprocessed and translated to English)
+Sentiment,Positive/Negative/Neutral (Preprocessed)
+Sentiment_Polarity,Sentiment polarity score
+Sentiment_Subjectivity,Sentiment subjectivity score

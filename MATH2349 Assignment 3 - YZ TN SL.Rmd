@@ -1,0 +1,508 @@
+---
+title: "MATH2349 Semester 1, 2019"
+author: "Yinan Zhang, Tanmay Nagi, Sabrina Loh"
+subtitle: Assignment 3
+output:
+  html_notebook: default
+---
+
+## Required packages 
+
+
+```{r setup}
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(knitr)
+library(forecast)
+library(car)
+
+```
+
+
+# Executive Summary 
+The aim of this assignment is to pre-process user review data of Google Play applications to prepare it for analysis on the application’s effectiveness e.g. Correlations between Price, reviews and sentiments and to rank the apps in different categories.
+
+The 2 data sets used, googleplaystore.csv and googleplaystore_user_reviews.csv, were imported and merged by a common variable (Apps). For a better understanding of the data set, an analysis of the structure and variable class type was conducted. Irrelevant variables were dropped to simplify the process. Then, data type conversions were carried out on some variables, some variables were factored while some ordered.
+
+The data was already in a tidy format, hence no reshaping was needed. 3 new columns were created through the mutate function which separated the date on which the application was last updated into day, month and year for easier comparison of data by month or year.
+
+Several missing values were identified in the data set. Rows with missing values in Ratings, Sentiment Polarity and Translated Review were removed, whereas missing values in Sizes were replaced by the mean size of their individual category using imputation. The missing values in Price were due to the applications being free, so they were replaced with a 0.
+
+Lastly, removal of outliers and transformation were performed to try to reduce the effects of outliers on skewing the results. The capping method was used to handle the outliers.  We capped outlier values with the closest 5th percentile.  On the heavily right skewed, data, log10 transformation was applied to the variable to reduce the skewness before capping.  This resulted in a more normal distribution and eliminated much of the perceived outliers.
+
+
+# Data 
+Data obtained from: https://www.kaggle.com/lava18/google-play-store-apps
+Data was scraped from Google Play App Store on over 10k apps as well as their reviews.
+
+Datasets used: googleplaystore.csv and googleplaystore_user_reviews.csv
+App information is stored in the googleplaystore.csv while reviews information is stored in the googleplaystore_user_reviews.csv. Variable descriptions for each dataset are shown below.
+
+Both datasets were imported and merged (left_join) by a common variable, ‘App’, for easier analysis. The left_join is appropriate as it matches rows from googleplaystore_user_reviews to googleplaystore, so that each review is matched to the appropriate app.
+
+To simplify the process, variables ‘Android Ver’ and ‘Current Ver’ were removed as version history will not be useful in the analysis. 
+
+## Loading the data into R.
+```{r echo=TRUE}
+googleplaystore <- read_csv("googleplaystore.csv")
+googleplaystore_user_reviews <- read_csv("googleplaystore_user_reviews.csv")
+playstoredescription <- read_csv("playstoredescription.csv")
+UserReviewsdescription <- read_csv("UserReviewsdescription.csv")
+```
+
+## Variables description in googleplaystore:
+```{r, echo=FALSE}
+kable(playstoredescription)
+```
+
+## Variables description in googleplaystore_user_reviews:
+```{r, echo=FALSE}
+kable(UserReviewsdescription)
+```
+
+## Joining the Data Sets
+
+The common variable on the data set is apps, where the name of the apps are stored. To create meaningful analysis, we will join the two data sets together with on the app names.   New table we will be working with will be called apps.
+
+```{r}
+apps <- googleplaystore %>% left_join(googleplaystore_user_reviews, by = "App")
+```
+
+## Understand 
+
+Checking the structure of the data
+
+```{r}
+str(apps)
+```
+
+
+## Removing unused variables 
+
+Version history is not useful for us. Therefore we decided to remove them as variables.
+
+* Android Ver  
+* Current Ver  
+
+```{r}
+apps<-apps %>% select(-c(`Android Ver`,`Current Ver`))
+colnames(apps)
+```
+
+## Converting the variable into ordered and unordered factors
+
+* Installs  
+* Type    
+* Content Ratings   
+* Sentiment   
+* Category  
+
+```{r}
+apps <- apps %>% mutate(
+  Installs = factor(apps$Installs, 
+                    levels = c( "0","0+","1+","5+","10+","50+","100+","500+","1,000+",
+                                "5,000+","10,000+",  "50,000+", "100,000+",  "500,000+",
+                                "1,000,000+","5,000,000+" ,  "10,000,000+" ,  "50,000,000+", "100,000,000+",
+                                "500,000,000+","1,000,000,000+") ,
+                    labels = c( "0","0+","1+","5+","10+","50+","100+","500+","1,000+",
+                                "5,000+","10,000+",  "50,000+", "100,000+",  "500,000+",
+                                "1,000,000+","5,000,000+" ,  "10,000,000+" ,  "50,000,000+",
+                                "100,000,000+", "500,000,000+","1,000,000,000+"),
+                    ordered=T),
+  Type = factor(apps$Type, 
+                levels = c("Free", "Paid"),
+                labels = c("Free", "Paid")),
+  `Content Rating`= factor(apps$`Content Rating`,
+                           levels = c("Everyone", "Everyone 10+",  "Teen", "Mature 17+", "Adults only 18+"),
+                           labels = c("Everyone", "Everyone 10+",  "Teen", "Mature 17+", "Adults only 18+"),
+                           ordered = T ),
+  Sentiment = factor(apps$Sentiment, 
+                      levels = c("Negative", "Neutral", "Positive"),
+                      labels = c("Negative", "Neutral", "Positive"),
+                      ordered = T),
+  Category = factor(apps$Category)
+  )
+str(apps[,c("Installs", "Type", "Content Rating", "Sentiment", "Category")]) 
+
+```
+
+## Date conversion
+
+Converting 'Last Updated' into date format in a new column. Then dropping the column 'Last Updated'. This is to avoid errors if run code twice, as it would convert date variables to NA.  This is to ensure integrity.
+
+```{r}
+apps <- apps %>% mutate(Updated = mdy(apps$`Last Updated`))
+apps <- apps %>% select(-`Last Updated`)
+
+str(apps$Updated)
+```
+
+## Changing Price from character to numeric
+
+```{r}
+apps$Price <- substr(apps$Price,2,nchar(apps$Price)) %>% as.numeric()
+
+str(apps$Price)
+```
+
+We note that as.numeric changes 0 to NA in the conversion process.   We will impute back the 0s in the scan process.
+
+## Changing application size variable to numeric 
+Application sizes are either recorded in megabytes, kilobytes, or are recorded as "varies with device".   We want to convert this to numeric for better analysis hence a common unit of measurement should be used.   We decided to use megabytes for this.   
+
+We first extract the numeric part from the string.  Then extract the ‘M’, or ‘k’.  if it is anything else, we recognise it as the ‘varies with device’ value.  This we are going to allow to be NA as we do not have enough information.   
+Finally we are putting it all together.  If it is in kilobytes, we are multiplying by 0.001 to adjust the value to be in megabytes.   NAs are recorded for ‘varies with device’ value.  This we will impute in the later section with the mean size of the respective category.
+
+
+```{r}
+unit_size<-str_extract(apps$Size,"[aA-zZ]") 
+value_size <- substr(apps$Size,start = 1,stop=(nchar(apps$Size)-1)) %>% as.numeric()
+
+conversion <-function(x,y) {ifelse(x=="M",y,ifelse(x=="k",y*0.001,NA))}
+size<-conversion(unit_size,value_size)
+apps<-apps %>% mutate(Size=size)
+
+class(apps$Size)
+summary(apps$Size)
+
+```
+
+## Check on data structure that all variables are in the right class.
+
+```{r}
+str(apps)
+```
+
+* Apps are the name of each app.  So okay to keep as character data.  
+* Genres are okay to keep as character data.  
+* Sentiment_Polarity and Sentiment_Subjectivity are out analysis variables and they should be in numerical.   
+* All other variable we have changed into the correct class.  
+
+
+#	Tidy & Manipulate Data I 
+
+The data is already in a tidy format since:  
+1. All variables have a column. - Each column relates to an attribute of the app.    
+2. All observations have row - ie. each row relates to an app and an individual review.  
+3. Each value is in a cell.   
+
+```{r}
+head(apps, 6)
+```
+
+#	Tidy & Manipulate Data II 
+
+If analysis on when is the app updated have an effect on the sentiment of the reviews, it will be useful to have the Year, Month, and Day of when last reviewed in separate columns for analysis.  
+
+Creating the Year, Month and Day column for updated values.
+
+```{r}
+apps <- apps %>% mutate(Day = day(apps$Updated), 
+                  Month = month(apps$Updated), 
+                  Year = year(apps$Updated))
+str(apps[,c("Day", "Month", "Year")])
+```
+
+
+#	Scan I 
+
+Checing for missing values(NA, Infinite and NaN).
+
+Checking the total number of missing and special values and displaying them to handle one by one.
+```{r}
+n <- colSums(is.na(apps)) %>% as.data.frame()
+names(n) <- "NA"
+
+i <- sapply(apps, is.infinite) %>% as.data.frame() %>% 
+colSums()
+
+nan <- sapply(apps, is.nan) %>% as.data.frame() %>% 
+colSums()
+
+x <- n %>% mutate(Infinite = i, Nan = nan) 
+row.names(x) <- colnames(apps)
+x
+
+```
+
+
+Checking why reviews and installs have only one NA
+```{r}
+apps[which(is.na(apps$Reviews)),]
+```
+Looks to have the values in the wrong columns.  It is likely to be an error from the scraping.  Since we have a large data sample, we will deal with it by deleting. 
+```{r}
+apps <- apps[-which(is.na(apps$Reviews)),]
+sum(is.na(apps$Reviews))
+```
+
+For missing values that are in ratings, we will deal with them by removing all rows with missing values.  Since our analysis are on rating sentiments.  The apps that does not have any ratings is not useful to be included.
+
+```{r}
+apps <- apps[-which(is.na(apps$Rating)),]
+sum(is.na(apps$Rating))
+```
+
+When converting Price into numeric, 0 was changed to NA.  As, 0 is still a valid price, and it does add value to the information, we are Imputing NA in price with 0.
+```{r}
+
+apps$Price[which(is.na(apps$Price))] <- 0
+sum(is.na(apps$Price))
+
+```
+
+For the Sizes variable, there was a value called "Varies with device".  When changing into numeric format, this have become NA.  
+
+We will impute these NA with the average size of apps of their individual category.
+
+```{r}
+apps <- apps %>% 
+  group_by(Category) %>% 
+  mutate(Size = ifelse(is.na(Size), 
+                           mean(Size,na.rm = T),
+                           Size)) %>% ungroup()
+
+# Checking if Size is imputed 
+sum(is.na(apps$Size))
+
+# Displaying sizes by categories 
+apps %>% 
+  group_by(Category) %>% summarise(mean=round(mean(Size),2))
+
+```
+
+Translated Review is where the reviews are collected.  An app user can leave or not leave a written review after giving a rating. If no rating is given, then it is recorded as NaN. Some, non recorded reviews are recorded as NA here.  Since we are going to analyse the sentiments, we will look at only reviews are left.  Therefore we will deal with missing vallues in Translated_Review by removing them.
+
+```{r}
+apps <- apps[-which(is.na(apps$Translated_Review)),]
+sum(is.na(apps$Translated_Review))
+```
+
+Sentiment Polarity is one of the variables for analysis.  Therefore it is good to have a data set with none missing values here,  Removing rows with missing values in Sentiment Polarity.   Also not that, is.na here also includes NaNs which was created for any apps that had a review but didn't leave any text.  We will be excluding these from our analysis.
+
+```{r}
+apps <- apps[-which(is.na(apps$Sentiment_Polarity)),]
+sum(is.na(apps$Sentiment_Polarity))
+
+```
+
+
+# Final missing value check:
+
+## Checking for NA, Inf and Nan.
+
+```{r}
+n <- colSums(is.na(apps)) %>% as.data.frame()
+names(n) <- "NA"
+
+i <- sapply(apps, is.infinite) %>% as.data.frame() %>% 
+colSums()
+
+nan <- sapply(apps, is.nan) %>% as.data.frame() %>% 
+colSums()
+
+x <- n %>% mutate(Infinite = i, Nan = nan) 
+row.names(x) <- colnames(apps)
+x
+
+```
+
+We have dealt with all the missing, infinite and Nan values.
+
+
+#	Scan II
+
+Identify numeric data
+
+```{r}
+check_numeric <-sapply(apps, is.numeric) %>% as.data.frame()
+names(check_numeric) <-"Numeric"
+check<-check_numeric %>% mutate(Variable=colnames(apps),Numeric=Numeric) 
+check<-check%>% filter(Numeric==T) %>% select(Variable,Numeric)
+check
+```
+
+We can see numeric data are  
+* Rating  
+* Reviews  
+* Size  
+* Price  
+* Sentiment_Polarity  
+* Sentiment_Subjectivity  
+
+We will ignore the variables Day, Month and Year as these have been created by us and it's not relevant to check for outliers 
+
+Checking for outliers in them:
+
+```{r}
+par(mfrow=c(2,3))
+Boxplot(apps$Rating, main="Rating")
+Boxplot(apps$Reviews, main="Reviews")
+Boxplot(apps$Size, main="Size")
+Boxplot(apps$Sentiment_Polarity, main= "Sentiment Polarity")
+Boxplot(apps$Sentiment_Subjectivity, main = "Sentiment Subjectivity")
+```
+
+
+For price, we group the data by Type of app (Free/Paid) and check for outliers as the data would otherwise be heavily skewed due to large number of free apps 
+```{r}
+
+Boxplot(apps$Price~apps$Type, main = "Price grouped by type of app")
+
+```
+
+Reviews looks to be severly right skewed.  
+
+```{r}
+hist(apps$Reviews, main="Reviews")
+
+```
+
+It will make better sense if we do a transformation of the data before capping the outliers in case of doing loosing too much information.
+
+
+## Capping the Outliers for:  
+* Rating  
+* Size  
+* Sentiment_Polarity
+* Sentiment_Subjectivity  
+
+We are capping them within the 95%.  As it makes sense for these variables to still have the outlier value creating an effect.  Just the effect should not be excessive.  
+
+```{r}
+cap <- function(x){
+quantiles <- quantile( x,probs =  c(0.05, 0.25, 0.75, 0.95),na.rm=TRUE)
+x[ x < quantiles[2] - 1.5*IQR(x,na.rm=T) ] <- quantiles[1]
+x[ x > quantiles[3] + 1.5*IQR(x,na.rm=T) ] <- quantiles[4]
+x
+}
+apps[,c("Rating", "Size","Sentiment_Polarity", "Sentiment_Subjectivity")] <- sapply(apps[,c("Rating", "Size","Sentiment_Polarity", "Sentiment_Subjectivity")], cap) %>% 
+  as.data.frame()
+
+
+```
+
+Capping the Outliers for Price grouped by Type (Paid apps get capped among paid apps only)
+
+```{r}
+
+apps <- apps %>% 
+  group_by(Type) %>% 
+  mutate(Price = cap(Price)) %>% ungroup()
+
+
+```
+
+
+
+### Checking if Outliers are capped:
+
+```{r}
+par(mfrow=c(2,2), pty = "s" )
+Boxplot(apps$Rating, main="Rating")
+Boxplot(apps$Size, main="Size")
+Boxplot(apps$Sentiment_Polarity, main= "Sentiment Polarity")
+Boxplot(apps$Sentiment_Subjectivity, main = "Sentiment Subjectivity")
+```
+It is seen that the outliers remain in Sentiment Subjectivity even after capping to the nearest 5th quantile 
+
+### Checking outliers for Price 
+```{r}
+Boxplot(apps$Price~apps$Type, main = "Price groupd by type of app")
+```
+It is seen that due to the number of highly priced apps the outliers remain even after capping to the nearest quantile 
+
+
+##	Transform 
+
+We see from the previous section that number of reviews is heavily skewed.
+  
+```{r}
+
+hist(apps$Reviews, main="Reviews")
+
+```
+
+So for heavily right skewed, we apply a log 10 transformation to get it to more normally distributed.
+
+```{r}
+apps <- apps %>% mutate(Reviews_t = log10(apps$Reviews))
+
+```
+
+### Checking the distribution of the transformed variable (reviews)
+
+```{r}
+
+hist(apps$Reviews_t, main="Log10(Reviews)")
+
+```
+
+```{r}
+
+Boxplot(apps$Reviews_t, main="log10(Reviews)")
+
+```
+
+We also note that by applying the transformation, all the outliers are removed also.
+
+
+# Summary
+
+Arranging the columns and the rows(according to Category and ranking)  and check the structure of the final data.
+```{r}
+
+apps<-apps %>% select(App,Category,Genres,Size,Updated,Year,Month,Day,Type,Price,`Content Rating`,Reviews,Rating,Installs,
+                        Translated_Review ,Sentiment,Sentiment_Polarity,  Sentiment_Subjectivity,Reviews_t)
+
+#arranging the data according to Categories (A-Z) and ratings (high to low) within these categories.
+apps<-apps %>% arrange(Category,desc(Rating))
+
+head(apps,10)
+
+#checking the structure of the final data
+str(apps)
+
+```
+
+After arranging the columns and row, check the structure of the final data. We see that our data is in the right format, ordered properly, tidy and does not have any missing values or outliers and is ready for analysis all irrelevant variables have been dropped. The data is now ready for analysis to understand how Apps are doing in different categories, type(Free/Paid), different price ranges by analysing rating, sentiments, sentiment polarity, number of installs, Content rating etc.   
+
+Below we present some basic analysis that could be helpful in understanding the data:
+
+### Finding the top 5 rated categories in the app store 
+```{r}
+ratings <- apps %>% group_by(Category) %>% summarise("Avg rating"=round(mean(Rating),2)) 
+ratings<-ratings%>% arrange (desc(`Avg rating`))
+head(ratings,5)
+```
+
+### Finding the top 5 rated apps in the app store 
+```{r}
+apprating<-apps %>% group_by(App)  %>% summarise(rating=mean(Rating))
+apprating<- apprating %>% arrange(desc(rating))
+head(apprating,5)
+```
+
+### Sentiment Polarity versus Last updated year
+```{r}
+boxplot(Sentiment_Polarity~Year,data = apps,
+        main="Sentiment spread based on last updated Year",
+        xlab = "Year last updated",
+        ylab = "Average Sentiment",
+        col=(c("lightblue") ))
+```
+
+### Sentiment Polarity versus Price
+```{r}
+boxplot(Sentiment_Polarity~Price, data = apps,
+        main="Sentiment spread based on Price",
+        xlab = "Price of App",
+        ylab = "Average Sentiment",
+        col=(c("gold")))
+```
+
+
